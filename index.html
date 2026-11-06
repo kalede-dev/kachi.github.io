@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seguidor de línea</title>
+<style>
+:root{--bg:#f5f5f2;--card:#fff;--tx:#1c1c1a;--mu:#6b6b66;--ac:#1d7a5f;--bd:#e0e0da;--rd:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#222221;--tx:#ecece8;--mu:#9a9a94;--ac:#3ecf9f;--bd:#333331;--rd:#ef6b5b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px system-ui,sans-serif;padding:12px 12px 90px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
+h2{font-size:12px;color:var(--mu);margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em}
+button{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 14px}
+button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
+.top b{font-size:17px}
+#st{color:var(--mu);font-size:13px}
+.bars{display:flex;gap:6px;height:200px}
+.col{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px}
+.col .v{font-size:11px;color:var(--mu);font-variant-numeric:tabular-nums}
+.track{flex:1;width:100%;background:var(--bd);border-radius:6px;display:flex;align-items:flex-end;overflow:hidden}
+.fill{width:100%;height:0;background:var(--ac);transition:height .08s}
+.col small{color:var(--mu)}
+.pos{position:relative;height:8px;background:var(--bd);border-radius:4px;margin:18px 6px 8px}
+.pos i{position:absolute;top:-5px;width:4px;height:18px;border-radius:2px;background:var(--tx);left:50%;transform:translateX(-50%)}
+.info{display:flex;justify-content:space-between;color:var(--mu);font-size:13px}
+.row{display:grid;grid-template-columns:34px 1fr auto;gap:8px;align-items:center;margin-bottom:10px}
+.row input[type=range]{width:100%;accent-color:var(--ac)}
+.num{display:flex;gap:4px}
+.num button{padding:6px 10px}
+.num input{width:70px;font:inherit;padding:6px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);text-align:center}
+.seg{display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap}
+.dock{position:fixed;left:0;right:0;bottom:0;display:flex;gap:10px;padding:10px 12px;background:var(--bg);border-top:1px solid var(--bd)}
+.dock button{flex:1;padding:16px;font-size:17px;font-weight:600;color:#fff;border:0}
+#go{background:var(--ac)} #stop{background:var(--rd)}
+#log{font:12px ui-monospace,monospace;color:var(--mu);height:110px;overflow:auto;white-space:pre-wrap;margin:0}
+#warn{color:var(--rd);font-size:13px;margin-bottom:10px}
+</style>
+</head>
+<body>
+<div class="top"><div><b>Seguidor de línea</b><div id="st">Desconectado</div></div><button id="con">Conectar</button></div>
+<div id="warn" hidden>Este navegador no soporta Web Bluetooth. Usa Chrome en Android (en iPhone, el navegador Bluefy).</div>
+
+<div class="card">
+  <h2>Sensores (1 izquierda → 8 derecha)</h2>
+  <div class="bars" id="bars"></div>
+  <div class="pos"><i id="mk"></i></div>
+  <div class="info"><span>Posición <b id="pos">–</b> / 7000</span><span id="ln">–</span><span id="run">–</span></div>
+</div>
+
+<div class="card">
+  <h2>PID y velocidad</h2>
+  <div id="params"></div>
+  <div class="seg"><span>Línea:</span><button id="bn">Negra</button><button id="bb">Blanca</button></div>
+  <div class="seg"><label><input type="checkbox" id="sens" checked> Enviar sensores cada</label>
+    <input id="ms" type="number" value="100" min="20" step="10" style="width:70px;padding:6px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx)"> ms</div>
+  <div class="seg"><button id="cal">Calibrar (5 s)</button><button id="save">Guardar en el robot</button></div>
+</div>
+
+<div class="card"><h2>Mensajes</h2><pre id="log"></pre></div>
+
+<div class="dock"><button id="go">GO</button><button id="stop">STOP</button></div>
+
+<script>
+const SVC='6e400001-b5a3-f393-e0a9-e50e24dcca9e', RXC='6e400002-b5a3-f393-e0a9-e50e24dcca9e',
+      TXC='6e400003-b5a3-f393-e0a9-e50e24dcca9e', DATAC='6e400004-b5a3-f393-e0a9-e50e24dcca9e';
+const $=id=>document.getElementById(id);
+let dev=null, rx=null, q=Promise.resolve(), buf='';
+if(!navigator.bluetooth){$('warn').hidden=false;$('con').disabled=true}
+
+function log(t){const l=$('log');l.textContent+=t+'\n';if(l.textContent.length>3000)l.textContent=l.textContent.slice(-2000);l.scrollTop=l.scrollHeight}
+
+// ---- barras ----
+for(let i=0;i<8;i++)$('bars').insertAdjacentHTML('beforeend',`<div class="col"><span class="v" id="v${i}">0</span><div class="track"><div class="fill" id="f${i}"></div></div><small>${i+1}</small></div>`);
+
+// ---- parámetros ----
+const P=[{k:'kp',n:'Kp',max:.5,st:.001,d:3},{k:'ki',n:'Ki',max:.05,st:.0001,d:4},{k:'kd',n:'Kd',max:2,st:.005,d:3},{k:'vel',n:'Vel',max:255,st:1,d:0}];
+const tt={};
+function enviarLento(k){if(tt[k])return;tt[k]=setTimeout(()=>{tt[k]=0;enviar(k+' '+$('s_'+k).value)},150)}
+P.forEach(p=>{
+  const r=document.createElement('div');r.className='row';
+  r.innerHTML=`<b>${p.n}</b><input type="range" id="s_${p.k}" min="0" max="${p.max}" step="${p.st}" value="0"><span class="num"><button>−</button><input type="number" id="n_${p.k}" min="0" step="${p.st}" value="0"><button>+</button></span>`;
+  $('params').append(r);
+  const s=$('s_'+p.k), n=$('n_'+p.k), [m,a]=r.querySelectorAll('button');
+  s.oninput=()=>{n.value=(+s.value).toFixed(p.d);enviarLento(p.k)};
+  s.onchange=()=>enviar(p.k+' '+s.value);
+  n.onchange=()=>{s.max=Math.max(p.max,+n.value);s.value=n.value;enviar(p.k+' '+n.value)};
+  const paso=d=>()=>{n.value=Math.max(0,+n.value+d*p.st*5).toFixed(p.d);n.onchange()};
+  m.onclick=paso(-1);a.onclick=paso(1);
+});
+function setP(k,v){const p=P.find(x=>x.k===k),s=$('s_'+k);s.max=Math.max(p.max,+v);s.value=v;$('n_'+k).value=(+v).toFixed(p.d)}
+
+// ---- Bluetooth ----
+function enviar(cmd){
+  if(!rx)return;
+  const d=new TextEncoder().encode(cmd+'\n');
+  q=q.then(async()=>{for(let i=0;i<d.length;i+=20){const c=d.slice(i,i+20);
+    if(rx.writeValueWithoutResponse)await rx.writeValueWithoutResponse(c);else await rx.writeValue(c)}})
+    .catch(e=>log('Error: '+e.message));
+}
+function onText(dv){
+  buf+=new TextDecoder().decode(dv);
+  let i;
+  while((i=buf.indexOf('\n'))>=0){
+    const l=buf.slice(0,i).trim();buf=buf.slice(i+1);
+    if(l[0]==='P'&&l[1]===' '){
+      const [,kp,ki,kd,vel,ln,sn,ms]=l.split(' ');
+      setP('kp',kp);setP('ki',ki);setP('kd',kd);setP('vel',vel);
+      $('bn').classList.toggle('on',ln==='n');$('bb').classList.toggle('on',ln==='b');
+      $('sens').checked=sn==='1';$('ms').value=ms;
+    }else if(l)log(l);
+  }
+}
+function onFrame(dv){
+  if(dv.byteLength<20||dv.getUint8(0)!==83)return;
+  for(let i=0;i<8;i++){const v=dv.getUint16(1+2*i,true);$('v'+i).textContent=v;$('f'+i).style.height=v/10+'%'}
+  const pos=dv.getUint16(17,true),fl=dv.getUint8(19);
+  $('mk').style.left=pos/70+'%';$('pos').textContent=pos;
+  $('ln').textContent=fl&1?'línea detectada':'sin línea';
+  $('run').textContent=fl&2?'En marcha':'Detenido';
+}
+function onDisc(){rx=null;$('st').textContent='Desconectado';$('con').textContent='Conectar';log('Desconectado')}
+
+$('con').onclick=async()=>{
+  if(dev&&dev.gatt.connected){dev.gatt.disconnect();return}
+  try{
+    dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'Seguidor'}],optionalServices:[SVC]});
+    dev.addEventListener('gattserverdisconnected',onDisc);
+    $('st').textContent='Conectando…';
+    const svc=await (await dev.gatt.connect()).getPrimaryService(SVC);
+    rx=await svc.getCharacteristic(RXC);
+    const tx=await svc.getCharacteristic(TXC), dt=await svc.getCharacteristic(DATAC);
+    tx.addEventListener('characteristicvaluechanged',e=>onText(e.target.value));
+    dt.addEventListener('characteristicvaluechanged',e=>onFrame(e.target.value));
+    await tx.startNotifications();await dt.startNotifications();
+    $('st').textContent='Conectado a '+dev.name;$('con').textContent='Desconectar';
+    enviar('ver');
+  }catch(e){$('st').textContent='Desconectado';log('Error: '+e.message)}
+};
+
+$('go').onclick=()=>enviar('go');
+$('stop').onclick=()=>enviar('stop');
+$('cal').onclick=()=>enviar('cal');
+$('save').onclick=()=>enviar('save');
+$('bn').onclick=()=>enviar('linea n');
+$('bb').onclick=()=>enviar('linea b');
+$('sens').onchange=()=>enviar('sens '+($('sens').checked?'on':'off'));
+$('ms').onchange=()=>enviar('sens '+Math.max(20,+$('ms').value||100));
+</script>
+</body>
+</html>
